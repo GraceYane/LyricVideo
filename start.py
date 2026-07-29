@@ -50,6 +50,7 @@ def main():
 
 
     print("\n🎉 全部流程结束！请查看 output/ 文件夹下的 .lrc 文件")
+    print("\n🎉 测试dev分支改动")
 
 
 
