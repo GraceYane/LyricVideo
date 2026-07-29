@@ -4,11 +4,11 @@
 *.mp3
 #*.lrc
 
-# 忽略 Python 缓存和环境文件
-#__pycache__/
-#*.py[cod]
-#.venv/
-#venv/
+ 忽略 Python 缓存和环境文件
+__pycache__/
+*.py[cod]
+.venv/
+venv/
 
 # 忽略 IDE 配置文件
 .idea/
