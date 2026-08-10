@@ -79,7 +79,7 @@ if __name__ == "__main__":
     # shift_single("Time After Time", -0.15)   # ← 改这里：歌曲名, 偏移秒数
     # shift_single("天行九歌", 1)
     # shift_single("主角", 0.15)
-    shift_single("游山恋", -0.18)
+    shift_single("滕王阁序", 6.65)
     # shift_single("出现又离开", 0.1)
     # ("武家坡2021", "", "wujiapo"),  # -0.2
     # ## ("知否知否", "胡夏&郁可唯", "haitang"),

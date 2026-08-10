@@ -37,6 +37,11 @@ CUSTOM_FONT_LYRIC = get_abs_path("resources", "fonts", "4.ttf")
 DEBUG_DURATION = 0.01
 DEBUG_MODE = False
 
+# 按优先级自动选择同名音频。优先保留无损格式，其次使用常见有损格式。
+SUPPORTED_AUDIO_EXTENSIONS = (
+    ".flac", ".wav", ".m4a", ".mp3", ".aac", ".ogg", ".opus", ".wma"
+)
+
 FS_CURRENT = 70 * SCALE
 FS_NORMAL = 54 * SCALE
 FS_TITLE = 85 * SCALE
@@ -127,6 +132,35 @@ def _find_image(folder: str, name_hint: str = None):
         for ext in exts:
             p = folder / (name_hint + ext)
             if p.exists(): return str(p)
+    return None
+
+
+def _find_audio(folder: str, song_name: str):
+    """查找同名音频，兼容传入“歌名”或“歌名.m4a”。"""
+    folder_path = Path(folder)
+    if not folder_path.is_dir():
+        return None
+
+    supplied = Path(song_name)
+    supplied_ext = supplied.suffix.lower()
+    stem = supplied.stem if supplied_ext in SUPPORTED_AUDIO_EXTENSIONS else song_name
+
+    # 调用方明确传入扩展名时，优先使用指定文件。
+    if supplied_ext in SUPPORTED_AUDIO_EXTENSIONS:
+        exact = folder_path / supplied.name
+        if exact.is_file():
+            return str(exact)
+
+    # Windows 通常不区分大小写，但这里仍显式兼容 .M4A、.MP3 等大写后缀。
+    files_by_name = {
+        item.name.lower(): item
+        for item in folder_path.iterdir()
+        if item.is_file()
+    }
+    for ext in SUPPORTED_AUDIO_EXTENSIONS:
+        matched = files_by_name.get(f"{stem}{ext}".lower())
+        if matched:
+            return str(matched)
     return None
 
 
@@ -277,21 +311,22 @@ def generate_lyric_video(song_name: str,
     target_bg = bg_name if bg_name else DEFAULT_BG_NAME
     target_cover = cover_name if cover_name else target_bg
 
-    # ──── 动态探测音频格式 ────
-    audio_ext = ".mp3"
-    if os.path.exists(get_abs_path("input", f"{song_name}.flac")):
-        audio_ext = ".flac"
-    elif os.path.exists(get_abs_path("input", f"{song_name}.wav")):
-        audio_ext = ".wav"
-    elif not os.path.exists(get_abs_path("input", f"{song_name}.mp3")):
-        raise FileNotFoundError(f"❌ 找不到歌曲音频文件：{song_name} (.flac/.mp3/.wav)")
+    # ──── 动态探测音频格式（支持 M4A）────
+    supplied_ext = Path(song_name).suffix.lower()
+    song_stem = Path(song_name).stem if supplied_ext in SUPPORTED_AUDIO_EXTENSIONS else song_name
+    input_dir = get_abs_path("input")
+    audio_path = _find_audio(input_dir, song_name)
+    if not audio_path:
+        supported = "/".join(SUPPORTED_AUDIO_EXTENSIONS)
+        raise FileNotFoundError(f"❌ 找不到歌曲音频文件：{song_stem}（支持 {supported}）")
 
-    audio_path = get_abs_path("input", f"{song_name}{audio_ext}")
-    lrc_path = get_abs_path("output", "lrcCorrection", f"{song_name}.lrc")
+    audio_ext = Path(audio_path).suffix.lower()
+    lrc_path = get_abs_path("output", "lrcCorrection", f"{song_stem}.lrc")
     img_dir = get_abs_path("resources", "imgs")
     out_dir = get_abs_path("output", "vedio")
-    video_path = os.path.join(out_dir, f"{song_name}.mp4")
+    video_path = os.path.join(out_dir, f"{song_stem}.mp4")
     os.makedirs(out_dir, exist_ok=True)
+    print(f"🎵 已找到音频：{os.path.basename(audio_path)}")
 
     fp = font_paths or {}
     fonts = {
@@ -309,10 +344,18 @@ def generate_lyric_video(song_name: str,
         shutil.copy2(audio_path, _tmp.name)
         _tmp_audio_path = _tmp.name
 
-    audio = AudioFileClip(_tmp_audio_path if _tmp_audio_path else audio_path)
+    clip_audio_path = _tmp_audio_path if _tmp_audio_path else audio_path
+    try:
+        audio = AudioFileClip(clip_audio_path)
+    except Exception as exc:
+        if _tmp_audio_path and os.path.exists(_tmp_audio_path):
+            os.remove(_tmp_audio_path)
+        raise RuntimeError(
+            f"❌ 无法读取音频 {os.path.basename(audio_path)}，请确认文件未损坏且 FFmpeg 可用：{exc}"
+        ) from exc
 
     meta, lyrics = _parse_lrc(lrc_path)
-    title = meta.get("ti", song_name)
+    title = meta.get("ti", song_stem)
     artist = artist_name or meta.get("ar", "")
 
     # ──── 背景图动态适配与裁剪部分 ────
@@ -406,9 +449,12 @@ if __name__ == "__main__":
         # ("金玉良缘", "李琦", "jinyuliangyuan"),
         #
         # ("命运", "家家", "mingyun"),
-        ("游山恋", "海伦/dj筱轩", "youshanlian2"),
-        ("半壶纱DJ", "Dr.Phonk", "banhusha2"),
-        # ("九万字", "黄诗扶", "jiuwanzi"),
+        # ("美人画卷", "闻人听书", "wang"),
+        ("蜀道难", "少司命", "蜀道难"),
+        # ("滕王阁序", "萧忆情&Assen捷", "滕王阁序"),
+        # ("游山恋", "海伦/dj筱轩", "youshanlian2"),
+        # ("半壶纱DJ", "Dr.Phonk", "banhusha2"),
+        # # ("九万字", "黄诗扶", "jiuwanzi"),
         # ("鸳鸯戏", "等什么君", "yuanyangxi"),,,
         # ("碧溪水", "银临", "bixishui"),
 

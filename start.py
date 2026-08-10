@@ -1,8 +1,7 @@
 import os
 import sys
 
-from MusicProcess.getMusic.bili_bgm import extract_bgm
-from MusicProcess.getMusic.hires import extract_bgmHires
+from lyricsProcess.audioToLrc import processFavoriteMusic
 from lyricsProcess.getLyrics import getLyrics
 from vedioProcess.vedioProduceIOS1 import  vedioProduceIOS1
 
@@ -14,23 +13,24 @@ def main():
     print("🎵 网易云歌词下载 + Whisper 时间轴校准工具")
     print("=" * 45)
 
+
+
     if(1==1):
-        mp3_paths = [
-
-
-              "https://www.bilibili.com/video/BV1TnUkBSEKk/?spm_id_from=333.1387.favlist.content.click&vd_source=e29259537f15576fed15e2ba7fcc511a"
-
-                     ]
-
-        # 指定目录输出
-        for i in mp3_paths:
-            # extract_bgm(i,output_dir="./biblMusic")
-            # extract_bgmHires(i, output_dir="./input")
-            extract_bgm(i, output_dir="./input")
+        processFavoriteMusic(
+            media_id=4081105827,
+            audio_output_dir="./input",
+            lrc_output_dir="./output/lrcCorrection",
+            skip_existing_audio=False,
+            overwrite_lrc=False,
+            # medium 对中文演唱识别更稳；首次使用会下载对应模型。
+            model_size="medium",
+            separate_vocals="auto",
+            max_count=1,
+        )
 
     # 待处理歌曲列表
     # npc song_list = ["颜色","春","广东爱情故事","这叫爱","吹梦到西洲","琵琶行","人生路漫漫"]  # 可继续添加
-    song_list = ["借过一下"]  # 可继续添加
+    song_list = ["夏天的风"]  # 可继续添加
 
     for song in song_list:
         if(1==11):
