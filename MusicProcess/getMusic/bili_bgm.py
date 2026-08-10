@@ -13,8 +13,8 @@ import re
 # ── 如果 PATH 里的 ffmpeg 是残缺版（conda 环境常见问题），在这里直接写死完整路径 ──
 # 例如: r"D:\AADownloads\Pffmpeg\ffmpeg\bin\ffmpeg.exe"
 # 留空则自动从 PATH 查找
-FFMPEG_PATH = r"D:\AADownloads\Pffmpeg\ffmpeg\bin\ffmpeg.exe"
-
+# FFMPEG_PATH = r"D:\AADownloads\Pffmpeg\ffmpeg\bin\ffmpeg.exe"
+FFMPEG_PATH = r"D:\AAADownload\pAnaconda\install_path\envs\douyin2\Lib\site-packages\imageio_ffmpeg\binaries\ffmpeg-win-x86_64-v7.1.exe"
 COOKIES_PATH = os.path.join(os.path.dirname(__file__), "www.bilibili.com_cookies.txt")
 def extract_title_core(title: str) -> str:
     """
