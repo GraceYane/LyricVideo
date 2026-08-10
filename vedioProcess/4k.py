@@ -1,26 +1,41 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
 import gc
-import os, re, math, shutil, tempfile
+import math
+import os
+import re
+import shutil
+import tempfile
+from bisect import bisect_right
 from pathlib import Path
-from PIL import Image, ImageDraw, ImageFont
+from typing import Dict, Optional, Tuple, List
+
 import numpy as np
+from PIL import Image, ImageDraw, ImageFont
 from moviepy.editor import VideoClip, AudioFileClip
-from sympy import true
-
-# ════════════════════════════════════════════════════════
-#  1. 路径自动对齐
-# ════════════════════════════════════════════════════════
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
-def get_abs_path(*rel_path):
+# ============================================================
+# 1. 路径配置
+# ============================================================
+
+PROJECT_ROOT = os.path.dirname(
+    os.path.dirname(os.path.abspath(__file__))
+)
+
+
+def get_abs_path(*rel_path) -> str:
+    """
+    根据项目根目录拼接绝对路径。
+    """
     return os.path.join(PROJECT_ROOT, *rel_path)
 
 
-# ════════════════════════════════════════════════════════
-#  全局默认配置  ★ 4K (3840×2160) 版本
-# ════════════════════════════════════════════════════════
+# ============================================================
+# 2. 全局配置
+# ============================================================
+
 SCALE = 2
 
 VIDEO_W = 3840
@@ -30,25 +45,37 @@ FPS = 55
 DEFAULT_BG_NAME = "jianlaihong"
 DEFAULT_COVER_NAME = "jianlaihong"
 
-CUSTOM_FONT_TITLE = get_abs_path("resources", "fonts", "msyh.ttc")
-# CUSTOM_FONT_TITLE = get_abs_path("resources", "fonts", "3.ttf")
-CUSTOM_FONT_ARTIST = get_abs_path("resources", "fonts", "shoujin.TTF")
-CUSTOM_FONT_LYRIC = get_abs_path("resources", "fonts", "msyh.ttc")
-# CUSTOM_FONT_LYRIC = get_abs_path("resources", "fonts", "4.ttf")
+CUSTOM_FONT_TITLE = get_abs_path(
+    "resources",
+    "fonts",
+    "msyh.ttc"
+)
+
+CUSTOM_FONT_ARTIST = get_abs_path(
+    "resources",
+    "fonts",
+    "shoujin.TTF"
+)
+
+CUSTOM_FONT_LYRIC = get_abs_path(
+    "resources",
+    "fonts",
+    "msyh.ttc"
+)
 
 DEBUG_DURATION = 0.04
 DEBUG_MODE = False
 
 FS_CURRENT = 52 * SCALE
 FS_NORMAL = 42 * SCALE
-# FS_CURRENT = 68 * SCALE
-# FS_NORMAL = 52 * SCALE
-FS_TITLE = 80 * SCALE
 FS_TITLE = 74 * SCALE
 FS_ARTIST = 52 * SCALE
 
-COVER_CX, COVER_CY, COVER_R = 320 * SCALE, 600 * SCALE, 200 * SCALE
+COVER_CX = 320 * SCALE
+COVER_CY = 600 * SCALE
+COVER_R = 200 * SCALE
 COVER_BORDER = 18 * SCALE
+
 RING_DOTS = 80
 RING_DOT_R = 4.5 * SCALE
 RING_GAP = 14 * SCALE
@@ -59,14 +86,21 @@ RING_PULSE_MIN_ALPHA = 80
 RING_PULSE_MAX_ALPHA = 255
 
 BG_SCALE_FACTOR = 1.05
-BG_SWAY_FREQ_X, BG_SWAY_FREQ_Y = 0.25, 0.18
+BG_SWAY_FREQ_X = 0.25
+BG_SWAY_FREQ_Y = 0.18
 BG_SWAY_AMP_X = 10.0 * SCALE
 BG_SWAY_AMP_Y = 8.0 * SCALE
 
-TITLE_X, TITLE_Y = 80 * SCALE, 90 * SCALE
-ARTIST_X, ARTIST_SPACING = 140 * SCALE, 30 * SCALE
-LYRIC_X, LYRIC_CURRENT_Y = 860 * SCALE, 320 * SCALE
+TITLE_X = 80 * SCALE
+TITLE_Y = 90 * SCALE
+
+ARTIST_X = 140 * SCALE
+ARTIST_SPACING = 30 * SCALE
+
+LYRIC_X = 860 * SCALE
+LYRIC_CURRENT_Y = 320 * SCALE
 LINE_H = 92 * SCALE
+
 LINES_ABOVE = 2
 LINES_BELOW = 6
 
@@ -80,810 +114,1319 @@ BG_OVERLAY = 85
 SCROLL_DURATION = 0.32
 
 
-# ════════════════════════════════════════════════════════
-#  工具函数
-# ════════════════════════════════════════════════════════
-def _load_font(size: int, bold: bool = False, custom_path: str = None):
+# ============================================================
+# 3. 支持的音频格式
+# ============================================================
+
+SUPPORTED_AUDIO_EXTENSIONS = (
+    ".mp3",
+    ".m4a",
+    ".flac",
+    ".wav",
+    ".aac",
+    ".ogg",
+    ".oga",
+    ".opus",
+    ".wma",
+    ".ape",
+    ".aiff",
+    ".aif",
+    ".m4b",
+    ".mka",
+    ".webm",
+)
+
+SUPPORTED_AUDIO_EXTENSIONS_CASEFOLD = {
+    ext.casefold()
+    for ext in SUPPORTED_AUDIO_EXTENSIONS
+}
+
+
+# ============================================================
+# 4. 音频文件查找
+# ============================================================
+
+def _find_audio_file(
+        audio_dir: str,
+        song_name: str
+) -> Path:
+    """
+    根据歌曲名称自动查找音频文件。
+
+    支持以下调用方式：
+
+        generate_lyric_video("歌曲名称")
+
+    或者：
+
+        generate_lyric_video("歌曲名称.m4a")
+
+    同名文件同时存在时，优先级为：
+
+        mp3 > m4a > flac > wav > 其他格式
+    """
+
+    audio_dir_path = Path(audio_dir)
+
+    if not audio_dir_path.is_dir():
+        raise FileNotFoundError(
+            f"找不到音频目录：{audio_dir_path}"
+        )
+
+    requested_path = Path(str(song_name))
+    requested_extension = requested_path.suffix.casefold()
+
+    if requested_path.suffix:
+        song_stem = requested_path.stem
+    else:
+        song_stem = requested_path.name
+
+    candidates: List[Path] = []
+
+    for path in audio_dir_path.iterdir():
+        if not path.is_file():
+            continue
+
+        extension = path.suffix.casefold()
+
+        if extension not in SUPPORTED_AUDIO_EXTENSIONS_CASEFOLD:
+            continue
+
+        if path.stem.casefold() == song_stem.casefold():
+            candidates.append(path)
+
+    if not candidates:
+        supported = "、".join(
+            SUPPORTED_AUDIO_EXTENSIONS
+        )
+
+        raise FileNotFoundError(
+            f"找不到歌曲音频：{song_stem}\n"
+            f"支持格式：{supported}"
+        )
+
+    # 如果调用时明确指定了扩展名，例如“歌曲.m4a”
+    if requested_extension in SUPPORTED_AUDIO_EXTENSIONS_CASEFOLD:
+        exact_candidates = [
+            path
+            for path in candidates
+            if path.suffix.casefold() == requested_extension
+        ]
+
+        if exact_candidates:
+            candidates = exact_candidates
+
+    extension_priority = {
+        ext: index
+        for index, ext in enumerate(
+            SUPPORTED_AUDIO_EXTENSIONS
+        )
+    }
+
+    candidates.sort(
+        key=lambda path: (
+            extension_priority.get(
+                path.suffix.casefold(),
+                999
+            ),
+            path.name.casefold()
+        )
+    )
+
+    return candidates[0]
+
+
+def _prepare_audio_for_ffmpeg(
+        audio_path: Path
+) -> Tuple[str, Optional[str]]:
+    """
+    处理中文音频路径。
+
+    某些 Windows + FFmpeg 环境对中文路径支持不稳定，
+    如果路径中存在非 ASCII 字符，就复制到临时目录再读取。
+    """
+
+    audio_path = Path(audio_path)
+    audio_text = str(audio_path)
+
+    # 路径只包含英文、数字和 ASCII 符号时，直接使用
+    if all(ord(char) < 128 for char in audio_text):
+        return audio_text, None
+
+    file_handle, temporary_path = tempfile.mkstemp(
+        prefix="lyricvideo_audio_",
+        suffix=audio_path.suffix
+    )
+
+    os.close(file_handle)
+
+    try:
+        shutil.copy2(
+            str(audio_path),
+            temporary_path
+        )
+    except Exception:
+        if os.path.exists(temporary_path):
+            os.remove(temporary_path)
+        raise
+
+    return temporary_path, temporary_path
+
+
+# ============================================================
+# 5. 通用工具函数
+# ============================================================
+
+def _close_quietly(resource) -> None:
+    """
+    安全释放资源，避免 close() 再次抛出异常。
+    """
+
+    if resource is None:
+        return
+
+    try:
+        resource.close()
+    except Exception:
+        pass
+
+
+def _load_font(
+        size: int,
+        bold: bool = False,
+        custom_path: Optional[str] = None
+):
+    """
+    加载字体。
+    """
+
     size = int(size)
+
     if custom_path and os.path.exists(custom_path):
         try:
-            return ImageFont.truetype(custom_path, size)
-        except Exception as e:
-            print(f"⚠️  无法加载字体 {custom_path}: {e}")
+            return ImageFont.truetype(
+                custom_path,
+                size
+            )
+        except Exception as error:
+            print(
+                f"警告：无法加载自定义字体 "
+                f"{custom_path}：{error}"
+            )
 
-    candidates = [r"C:\Windows\Fonts\msyh.ttc", "/System/Library/Fonts/PingFang.ttc"]
-    for p in candidates:
-        if os.path.exists(p):
-            return ImageFont.truetype(p, size)
+    candidates = [
+        r"C:\Windows\Fonts\msyh.ttc",
+        r"C:\Windows\Fonts\msyhbd.ttc",
+        "/System/Library/Fonts/PingFang.ttc",
+        "/usr/share/fonts/truetype/wqy/"
+        "wqy-zenhei.ttc",
+    ]
+
+    for font_path in candidates:
+        if os.path.exists(font_path):
+            try:
+                return ImageFont.truetype(
+                    font_path,
+                    size
+                )
+            except Exception:
+                pass
+
     return ImageFont.load_default()
 
 
-def _parse_lrc(lrc_path: str):
-    meta, lines = {}, []
-    time_pat = re.compile(r'\[(\d{2}):(\d{2})\.(\d{2,3})\]')
-    meta_pat = re.compile(r'\[(\w+):(.*)\]')
-    with open(lrc_path, encoding='utf-8', errors='replace') as f:
-        for raw in f:
-            raw = raw.strip()
-            if not raw: continue
-            m = meta_pat.match(raw)
-            if m and not time_pat.search(raw):
-                meta[m.group(1).lower()] = m.group(2).strip()
-                continue
-            times = time_pat.findall(raw)
-            text = time_pat.sub('', raw).strip()
-            if not text: continue
-            for mm, ss, ms in times:
-                t = int(mm) * 60 + int(ss) + int(ms.ljust(3, '0')[:3]) / 1000.0
-                lines.append((t, text))
-    lines.sort(key=lambda x: x[0])
-    return meta, lines
+def _find_image(
+        folder: str,
+        name_hint: Optional[str] = None
+) -> Optional[str]:
+    """
+    根据图片名称查找背景图或封面图。
 
+    支持 jpg、jpeg、png、webp、bmp，
+    同时忽略文件名和扩展名大小写。
+    """
 
-def _find_image(folder: str, name_hint: str = None):
-    exts = [".jpg", ".jpeg", ".png", ".webp", ".bmp"]
-    folder = Path(folder)
-    if not folder.exists(): return None
-    if name_hint:
-        for ext in exts:
-            p = folder / (name_hint + ext)
-            if p.exists(): return str(p)
+    image_extensions = {
+        ".jpg",
+        ".jpeg",
+        ".png",
+        ".webp",
+        ".bmp",
+    }
+
+    folder_path = Path(folder)
+
+    if not folder_path.is_dir():
+        return None
+
+    if not name_hint:
+        return None
+
+    hint_path = Path(str(name_hint))
+    hint_stem = hint_path.stem.casefold()
+    hint_name = hint_path.name.casefold()
+
+    for path in folder_path.iterdir():
+        if not path.is_file():
+            continue
+
+        if path.suffix.casefold() not in image_extensions:
+            continue
+
+        if (
+            path.stem.casefold() == hint_stem
+            or path.name.casefold() == hint_name
+        ):
+            return str(path)
+
     return None
 
 
+# ============================================================
+# 6. LRC 歌词解析
+# ============================================================
+
+def _parse_lrc(
+        lrc_path: str
+) -> Tuple[Dict[str, str], List[Tuple[float, str]]]:
+    """
+    解析 LRC 文件。
+
+    支持：
+
+        [00:12.34]歌词内容
+        [00:12.345]歌词内容
+        [00:12]歌词内容
+        [00:12.34][00:25.10]重复歌词
+
+    返回：
+
+        meta:
+            歌曲标题、歌手等元数据
+
+        lines:
+            [(时间秒数, 歌词文本), ...]
+    """
+
+    metadata: Dict[str, str] = {}
+    lyric_lines: List[Tuple[float, str]] = []
+
+    time_pattern = re.compile(
+        r"\[(\d+):(\d{1,2})"
+        r"(?:[.:](\d{1,3}))?\]"
+    )
+
+    metadata_pattern = re.compile(
+        r"^\[([A-Za-z]+):(.*?)\]\s*$"
+    )
+
+    with open(
+        lrc_path,
+        "r",
+        encoding="utf-8-sig",
+        errors="replace"
+    ) as file:
+        for raw_line in file:
+            line = raw_line.strip()
+
+            if not line:
+                continue
+
+            time_matches = time_pattern.findall(line)
+
+            if time_matches:
+                text = time_pattern.sub(
+                    "",
+                    line
+                ).strip()
+
+                if not text:
+                    continue
+
+                for minutes, seconds, fraction in time_matches:
+                    fraction = fraction or "0"
+
+                    if len(fraction) == 1:
+                        milliseconds = int(fraction) * 100
+                    elif len(fraction) == 2:
+                        milliseconds = int(fraction) * 10
+                    else:
+                        milliseconds = int(fraction[:3])
+
+                    timestamp = (
+                        int(minutes) * 60
+                        + int(seconds)
+                        + milliseconds / 1000.0
+                    )
+
+                    lyric_lines.append(
+                        (timestamp, text)
+                    )
+
+                continue
+
+            metadata_match = metadata_pattern.match(line)
+
+            if metadata_match:
+                key = metadata_match.group(1).lower()
+                value = metadata_match.group(2).strip()
+                metadata[key] = value
+
+    lyric_lines.sort(key=lambda item: item[0])
+
+    return metadata, lyric_lines
+
+
+# ============================================================
+# 7. 画面绘制函数
+# ============================================================
+
 def _ease_out_cubic(t: float) -> float:
-    return 1 - (1 - max(0.0, min(1.0, t))) ** 3
+    """
+    缓动函数。
+    """
+
+    t = max(0.0, min(1.0, t))
+    return 1.0 - (1.0 - t) ** 3
 
 
-def _draw_text(draw, x, y, text, font, color, alpha=255):
-    r, g, b = color[:3]
-    offset = 2 * SCALE
-    draw.text((x + offset, y + offset), text, font=font, fill=(0, 0, 0, min(120, alpha // 2)))
-    draw.text((x, y), text, font=font, fill=(r, g, b, alpha))
+def _draw_text(
+        draw,
+        x: int,
+        y: int,
+        text: str,
+        font,
+        color,
+        alpha: int = 255
+) -> None:
+    """
+    绘制带阴影的文字。
+    """
+
+    red, green, blue = color[:3]
+    shadow_offset = 2 * SCALE
+
+    draw.text(
+        (
+            x + shadow_offset,
+            y + shadow_offset
+        ),
+        text,
+        font=font,
+        fill=(
+            0,
+            0,
+            0,
+            min(120, alpha // 2)
+        )
+    )
+
+    draw.text(
+        (x, y),
+        text,
+        font=font,
+        fill=(
+            red,
+            green,
+            blue,
+            alpha
+        )
+    )
 
 
-def _paste_cover(frame: Image.Image, cover_base: Image.Image, t: float):
-    cx, cy, r = COVER_CX, COVER_CY, COVER_R
-    bw = COVER_BORDER
-    bd = (r + bw) * 2
+def _paste_cover(
+        frame: Image.Image,
+        cover_base: Image.Image,
+        t: float
+) -> None:
+    """
+    绘制旋转唱片封面。
+    """
 
-    current_deg = (t * COVER_ROT_DEG_PER_SEC) % 360
-    rotated = cover_base.rotate(-current_deg, resample=Image.BICUBIC, expand=False)
+    center_x = COVER_CX
+    center_y = COVER_CY
+    radius = COVER_R
+    border_width = COVER_BORDER
 
-    d = r * 2
-    mask = Image.new("L", (d, d), 0)
-    ImageDraw.Draw(mask).ellipse((0, 0, d, d), fill=255)
-    cover_circle = Image.new("RGBA", (d, d), (0, 0, 0, 0))
-    cover_circle.paste(rotated, mask=mask)
+    border_diameter = (
+        radius + border_width
+    ) * 2
 
-    border = Image.new("RGBA", (bd, bd), (0, 0, 0, 0))
-    bmask = Image.new("L", (bd, bd), 0)
-    ImageDraw.Draw(bmask).ellipse((0, 0, bd, bd), fill=255)
-    border.paste(Image.new("RGBA", (bd, bd), (0, 0, 0, 255)), mask=bmask)
+    current_degree = (
+        t * COVER_ROT_DEG_PER_SEC
+    ) % 360
 
-    frame.paste(border, (cx - r - bw, cy - r - bw), border)
-    frame.paste(cover_circle, (cx - r, cy - r), cover_circle)
+    rotated = cover_base.rotate(
+        -current_degree,
+        resample=Image.BICUBIC,
+        expand=False
+    )
 
-    mask.close()
-    cover_circle.close()
-    border.close()
-    bmask.close()
-    rotated.close()
+    diameter = radius * 2
+
+    mask = Image.new(
+        "L",
+        (diameter, diameter),
+        0
+    )
+
+    ImageDraw.Draw(mask).ellipse(
+        (0, 0, diameter, diameter),
+        fill=255
+    )
+
+    cover_circle = Image.new(
+        "RGBA",
+        (diameter, diameter),
+        (0, 0, 0, 0)
+    )
+
+    cover_circle.paste(
+        rotated,
+        mask=mask
+    )
+
+    border = Image.new(
+        "RGBA",
+        (
+            border_diameter,
+            border_diameter
+        ),
+        (0, 0, 0, 0)
+    )
+
+    border_mask = Image.new(
+        "L",
+        (
+            border_diameter,
+            border_diameter
+        ),
+        0
+    )
+
+    ImageDraw.Draw(border_mask).ellipse(
+        (
+            0,
+            0,
+            border_diameter,
+            border_diameter
+        ),
+        fill=255
+    )
+
+    border.paste(
+        Image.new(
+            "RGBA",
+            (
+                border_diameter,
+                border_diameter
+            ),
+            (0, 0, 0, 255)
+        ),
+        mask=border_mask
+    )
+
+    frame.paste(
+        border,
+        (
+            center_x - radius - border_width,
+            center_y - radius - border_width
+        ),
+        border
+    )
+
+    frame.paste(
+        cover_circle,
+        (
+            center_x - radius,
+            center_y - radius
+        ),
+        cover_circle
+    )
+
+    _close_quietly(mask)
+    _close_quietly(cover_circle)
+    _close_quietly(border)
+    _close_quietly(border_mask)
+    _close_quietly(rotated)
 
 
-def _draw_ring_dots(layer: Image.Image, t: float):
+def _draw_ring_dots(
+        layer: Image.Image,
+        t: float
+) -> None:
+    """
+    绘制封面周围的呼吸点。
+    """
+
     draw = ImageDraw.Draw(layer)
-    cx, cy, r = COVER_CX, COVER_CY, COVER_R
-    dist = r + COVER_BORDER + RING_GAP
-    pulse = math.sin(t * RING_PULSE_FREQ * 2 * math.pi)
-    alpha = int((RING_PULSE_MAX_ALPHA - RING_PULSE_MIN_ALPHA) / 2 * (pulse + 1) + RING_PULSE_MIN_ALPHA)
-    for i in range(RING_DOTS):
-        angle = 2 * math.pi * i / RING_DOTS
-        x = cx + dist * math.cos(angle)
-        y = cy + dist * math.sin(angle)
+
+    pulse = math.sin(
+        t * RING_PULSE_FREQ * 2 * math.pi
+    )
+
+    alpha = int(
+        (
+            RING_PULSE_MAX_ALPHA
+            - RING_PULSE_MIN_ALPHA
+        ) / 2
+        * (pulse + 1)
+        + RING_PULSE_MIN_ALPHA
+    )
+
+    distance = (
+        COVER_R
+        + COVER_BORDER
+        + RING_GAP
+    )
+
+    for index in range(RING_DOTS):
+        angle = (
+            2 * math.pi * index / RING_DOTS
+        )
+
+        x = COVER_CX + distance * math.cos(angle)
+        y = COVER_CY + distance * math.sin(angle)
+
         draw.ellipse(
-            (x - RING_DOT_R, y - RING_DOT_R, x + RING_DOT_R, y + RING_DOT_R),
-            fill=(255, 255, 255, alpha)
+            (
+                x - RING_DOT_R,
+                y - RING_DOT_R,
+                x + RING_DOT_R,
+                y + RING_DOT_R
+            ),
+            fill=(
+                255,
+                255,
+                255,
+                alpha
+            )
         )
 
 
-def _render_frame(t, bg_scaled, cover_base, lyrics, song_title, artist, fonts):
-    sway_x = int(round(math.sin(t * BG_SWAY_FREQ_X * 2 * math.pi) * BG_SWAY_AMP_X))
-    sway_y = int(round(math.cos(t * BG_SWAY_FREQ_Y * 2 * math.pi) * BG_SWAY_AMP_Y))
-    sw, sh = bg_scaled.size
-    cx_crop = max(0, min((sw - VIDEO_W) // 2 + sway_x, sw - VIDEO_W))
-    cy_crop = max(0, min((sh - VIDEO_H) // 2 + sway_y, sh - VIDEO_H))
+def _render_frame(
+        t,
+        bg_scaled: Image.Image,
+        cover_base: Image.Image,
+        lyrics: List[Tuple[float, str]],
+        lyric_times: List[float],
+        song_title: str,
+        artist: str,
+        fonts: Dict[str, object]
+):
+    """
+    根据时间渲染单帧画面。
+    """
 
-    frame = bg_scaled.crop((cx_crop, cy_crop, cx_crop + VIDEO_W, cy_crop + VIDEO_H)).convert("RGBA")
-    frame = Image.alpha_composite(frame, Image.new("RGBA", frame.size, (0, 0, 0, BG_OVERLAY)))
+    sway_x = int(
+        round(
+            math.sin(
+                t * BG_SWAY_FREQ_X * 2 * math.pi
+            ) * BG_SWAY_AMP_X
+        )
+    )
 
-    _paste_cover(frame, cover_base, t)
+    sway_y = int(
+        round(
+            math.cos(
+                t * BG_SWAY_FREQ_Y * 2 * math.pi
+            ) * BG_SWAY_AMP_Y
+        )
+    )
 
-    ring_layer = Image.new("RGBA", frame.size, (0, 0, 0, 0))
-    _draw_ring_dots(ring_layer, t)
-    frame = Image.alpha_composite(frame, ring_layer)
+    scaled_width, scaled_height = bg_scaled.size
+
+    crop_x = max(
+        0,
+        min(
+            (scaled_width - VIDEO_W) // 2 + sway_x,
+            scaled_width - VIDEO_W
+        )
+    )
+
+    crop_y = max(
+        0,
+        min(
+            (scaled_height - VIDEO_H) // 2 + sway_y,
+            scaled_height - VIDEO_H
+        )
+    )
+
+    frame = bg_scaled.crop(
+        (
+            crop_x,
+            crop_y,
+            crop_x + VIDEO_W,
+            crop_y + VIDEO_H
+        )
+    ).convert("RGBA")
+
+    overlay = Image.new(
+        "RGBA",
+        frame.size,
+        (0, 0, 0, BG_OVERLAY)
+    )
+
+    frame = Image.alpha_composite(
+        frame,
+        overlay
+    )
+
+    _close_quietly(overlay)
+
+    _paste_cover(
+        frame,
+        cover_base,
+        t
+    )
+
+    ring_layer = Image.new(
+        "RGBA",
+        frame.size,
+        (0, 0, 0, 0)
+    )
+
+    _draw_ring_dots(
+        ring_layer,
+        t
+    )
+
+    frame = Image.alpha_composite(
+        frame,
+        ring_layer
+    )
+
+    _close_quietly(ring_layer)
 
     draw = ImageDraw.Draw(frame)
-    _draw_text(draw, TITLE_X, TITLE_Y, f"【{song_title}】", fonts["title"], C_TITLE)
-    if artist:
-        _draw_text(draw, ARTIST_X, TITLE_Y + FS_TITLE + ARTIST_SPACING, artist, fonts["artist"], C_ARTIST)
 
-    cur = -1
-    for i, (ts, _) in enumerate(lyrics):
-        if ts <= t: cur = i
+    _draw_text(
+        draw,
+        TITLE_X,
+        TITLE_Y,
+        f"【{song_title}】",
 
-    if cur == -1:
-        scroll_offset, top_offset = 0, 0
-    else:
-        scroll_offset = LINE_H * (1.0 - _ease_out_cubic((t - lyrics[cur][0]) / SCROLL_DURATION))
-        top_offset = max(0, LINES_ABOVE - cur) * LINE_H
-
-    display_cur = max(cur, 0)
-    for rel in range(-LINES_ABOVE, LINES_BELOW + 1):
-        idx = display_cur + rel
-        if idx < 0 or idx >= len(lyrics): continue
-        y = int(LYRIC_CURRENT_Y - top_offset + rel * LINE_H + scroll_offset)
-        is_current = (rel == 0 and cur >= 0)
-        font = fonts["current"] if is_current else fonts["normal"]
-        color = C_CURRENT if is_current else (C_ABOVE if rel < 0 else C_BELOW)
-        alpha = (255 if is_current
-                 else max(0, int(200 * (1.0 - abs(rel) * 0.45))) if rel < 0
-        else max(0, int(150 * (1.0 - (rel - 1) * 0.13))))
-        if alpha > 0:
-            _draw_text(draw, LYRIC_X, y, lyrics[idx][1], font, color, alpha)
-
-    ret_array = np.array(frame.convert("RGB"))
-
-    frame.close()
-    ring_layer.close()
-
-    return ret_array
-
-
-# ════════════════════════════════════════════════════════
-#  🎯 主封装函数
-# ════════════════════════════════════════════════════════
-def generate_lyric_video(song_name: str,
-                         artist_name: str = "",
-                         bg_name: str = None,
-                         cover_name: str = None,
-                         font_paths: dict = None) -> str:
-    target_bg = bg_name if bg_name else DEFAULT_BG_NAME
-    target_cover = cover_name if cover_name else target_bg
-
-    # ──── 动态探测音频格式 ────
-    audio_ext = ".mp3"
-    if os.path.exists(get_abs_path("input", f"{song_name}.flac")):
-        audio_ext = ".flac"
-    elif os.path.exists(get_abs_path("input", f"{song_name}.wav")):
-        audio_ext = ".wav"
-    elif not os.path.exists(get_abs_path("input", f"{song_name}.mp3")):
-        raise FileNotFoundError(f"❌ 找不到歌曲音频文件：{song_name} (.flac/.mp3/.wav)")
-
-    audio_path = get_abs_path("input", f"{song_name}{audio_ext}")
-    lrc_path = get_abs_path("output", "lrcCorrection", f"{song_name}.lrc")
-
-    #薛之谦定制
-    # audio_ext = ".mp3"
-    # if os.path.exists(get_abs_path("input", "XueZhiQian", f"{song_name}.flac")):
-    #     audio_ext = ".flac"
-    # elif os.path.exists(get_abs_path("input", "XueZhiQian", f"{song_name}.wav")):
-    #     audio_ext = ".wav"
-    # elif not os.path.exists(get_abs_path("input", "XueZhiQian", f"{song_name}.mp3")):
-    #     raise FileNotFoundError(f"❌ 找不到歌曲音频文件：{song_name} (.flac/.mp3/.wav)")
-    #
-    # audio_path = get_abs_path("input", "XueZhiQian", f"{song_name}{audio_ext}")
-    # lrc_path = get_abs_path("output", "lrcCorrection", "XueZhiQian", f"{song_name}.lrc")
-
-    img_dir = get_abs_path("resources", "imgs")
-    out_dir = get_abs_path("output", "vedio")
-    video_path = os.path.join(out_dir, f"{song_name}.mp4")
-    os.makedirs(out_dir, exist_ok=True)
-
-    fp = font_paths or {}
-    fonts = {
-        "current": _load_font(FS_CURRENT, bold=True, custom_path=fp.get("lyric", CUSTOM_FONT_LYRIC)),
-        "normal": _load_font(FS_NORMAL, custom_path=fp.get("lyric", CUSTOM_FONT_LYRIC)),
-        "title": _load_font(FS_TITLE, bold=True, custom_path=fp.get("title", CUSTOM_FONT_TITLE)),
-        "artist": _load_font(FS_ARTIST, custom_path=fp.get("artist", CUSTOM_FONT_ARTIST)),
-    }
-
-    # ──── 动态处理中文路径与对应的临时文件 ────
-    _tmp_audio_path = None
-    if not all(ord(c) < 128 for c in audio_path):
-        _tmp = tempfile.NamedTemporaryFile(suffix=audio_ext, delete=False)
-        _tmp.close()
-        shutil.copy2(audio_path, _tmp.name)
-        _tmp_audio_path = _tmp.name
-
-    audio = AudioFileClip(_tmp_audio_path if _tmp_audio_path else audio_path)
-
-    meta, lyrics = _parse_lrc(lrc_path)
-    title = meta.get("ti", song_name)
-    artist = artist_name or meta.get("ar", "")
-
-    # ──── 背景图动态适配与裁剪部分 ────
-    bg_p = _find_image(img_dir, target_bg)
-    if bg_p:
-        with Image.open(bg_p) as img_raw:
-            orig_w, orig_h = img_raw.size
-            target_aspect = VIDEO_W / VIDEO_H
-            orig_aspect = orig_w / orig_h
-
-            if orig_aspect > target_aspect:
-                new_w = int(orig_h * target_aspect)
-                left = (orig_w - new_w) // 2
-                crop_box = (left, 0, left + new_w, orig_h)
-            else:
-                new_h = int(orig_w / target_aspect)
-                top = (orig_h - new_h) // 2
-                crop_box = (0, top, orig_w, top + new_h)
-
-            bg_full = img_raw.crop(crop_box).resize((VIDEO_W, VIDEO_H), Image.LANCZOS)
-    else:
-        bg_full = Image.new("RGB", (VIDEO_W, VIDEO_H), (20, 20, 30))
-
-    bg_scaled = bg_full.resize(
-        (int(VIDEO_W * BG_SCALE_FACTOR), int(VIDEO_H * BG_SCALE_FACTOR)),
-        Image.LANCZOS
-    ).convert("RGBA")
-    bg_full.close()
-
-    # ──── 封面图逻辑 ────
-    cp = _find_image(img_dir, target_cover)
-    cover_src = Image.open(cp if cp else (bg_p if bg_p else None)).convert("RGB")
-    w, h = cover_src.size
-    sq = min(w, h)
-    cover_src = cover_src.crop(((w - sq) // 2, (h - sq) // 2, (w + sq) // 2, (h + sq) // 2))
-
-    d = COVER_R * 2
-    cover_base = cover_src.resize((d, d), Image.LANCZOS).convert("RGBA")
-    cover_src.close()
-
-    render_dur = DEBUG_DURATION if DEBUG_MODE else audio.duration
-
-    video = VideoClip(
-        lambda t: _render_frame(t, bg_scaled, cover_base, lyrics, title, artist, fonts),
-        duration=render_dur
+        fonts["title"],
+        C_TITLE
     )
-    video = video.set_audio(audio.subclip(0, render_dur))
 
-    _tmp_v = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False).name
-
-    try:
-        # ──── ★ B站黄金优化：统一采用主流兼容的高规格 AAC 编码，强制锁死 320k 超高码率 ────
-        v_audio_codec = "aac"
-
-        video.write_videofile(
-            _tmp_v, fps=FPS, codec="libx264", audio_codec=v_audio_codec, preset="fast",
-            ffmpeg_params=["-crf", "18", "-threads", "4", "-b:a", "320k"]
+    if artist:
+        _draw_text(
+            draw,
+            ARTIST_X,
+            TITLE_Y + FS_TITLE + ARTIST_SPACING,
+            artist,
+            fonts["artist"],
+            C_ARTIST
         )
 
-        video.close()
-        audio.close()
+    if lyric_times:
+        current_index = (
+            bisect_right(lyric_times, t) - 1
+        )
+    else:
+        current_index = -1
 
+    if current_index < 0:
+        scroll_offset = 0
+        top_offset = 0
+    else:
+        elapsed = (
+            t - lyrics[current_index][0]
+        )
+
+        scroll_progress = (
+            elapsed / SCROLL_DURATION
+        )
+
+        scroll_offset = (
+            LINE_H
+            * (
+                1.0
+                - _ease_out_cubic(
+                    scroll_progress
+                )
+            )
+        )
+
+        top_offset = max(
+            0,
+            LINES_ABOVE - current_index
+        ) * LINE_H
+
+    display_current_index = max(
+        current_index,
+        0
+    )
+
+    for relative_index in range(
+        -LINES_ABOVE,
+        LINES_BELOW + 1
+    ):
+        lyric_index = (
+            display_current_index
+            + relative_index
+        )
+
+        if (
+            lyric_index < 0
+            or lyric_index >= len(lyrics)
+        ):
+            continue
+
+        y = int(
+            LYRIC_CURRENT_Y
+            - top_offset
+            + relative_index * LINE_H
+            + scroll_offset
+        )
+
+        is_current = (
+            relative_index == 0
+            and current_index >= 0
+        )
+
+        font = (
+            fonts["current"]
+            if is_current
+            else fonts["normal"]
+        )
+
+        color = (
+            C_CURRENT
+            if is_current
+            else (
+                C_ABOVE
+                if relative_index < 0
+                else C_BELOW
+            )
+        )
+
+        if is_current:
+            alpha = 255
+        elif relative_index < 0:
+            alpha = max(
+                0,
+                int(
+                    200
+                    * (
+                        1.0
+                        - abs(relative_index) * 0.45
+                    )
+                )
+            )
+        else:
+            alpha = max(
+                0,
+                int(
+                    150
+                    * (
+                        1.0
+                        - (
+                            relative_index - 1
+                        ) * 0.13
+                    )
+                )
+            )
+
+        if alpha <= 0:
+            continue
+
+        _draw_text(
+            draw,
+            LYRIC_X,
+            y,
+            lyrics[lyric_index][1],
+            font,
+            color,
+            alpha
+        )
+
+    result = np.array(
+        frame.convert("RGB")
+    )
+
+    _close_quietly(frame)
+
+    return result
+
+
+# ============================================================
+# 8. 主视频生成函数
+# ============================================================
+
+def generate_lyric_video(
+        song_name: str,
+        artist_name: str = "",
+        bg_name: Optional[str] = None,
+        cover_name: Optional[str] = None,
+        font_paths: Optional[Dict[str, str]] = None
+) -> str:
+    """
+    生成歌词视频。
+
+    song_name 可以写：
+
+        "歌曲名称"
+        "歌曲名称.m4a"
+        "歌曲名称.M4A"
+
+    程序会自动寻找 input 目录下对应的音频文件。
+    """
+
+    requested_path = Path(str(song_name))
+    song_stem = (
+        requested_path.stem
+        if requested_path.suffix
+        else requested_path.name
+    )
+
+    target_bg = (
+        bg_name
+        if bg_name
+        else DEFAULT_BG_NAME
+    )
+
+    # 第四个参数不填时，封面默认使用第三个背景参数
+    target_cover = (
+        cover_name
+        if cover_name
+        else target_bg
+    )
+
+    input_dir = Path(
+        get_abs_path("input")
+    )
+
+    lrc_path = Path(
+        get_abs_path(
+            "output",
+            "lrcCorrection",
+            f"{song_stem}.lrc"
+        )
+    )
+
+    img_dir = get_abs_path(
+        "resources",
+        "imgs"
+    )
+
+    output_dir = get_abs_path(
+        "output",
+        "vedio"
+    )
+
+    os.makedirs(
+        output_dir,
+        exist_ok=True
+    )
+
+    video_path = os.path.join(
+        output_dir,
+        f"{song_stem}.mp4"
+    )
+
+    # 自动查找音频文件
+    audio_path = _find_audio_file(
+        input_dir,
+        song_name
+    )
+
+    if not lrc_path.is_file():
+        raise FileNotFoundError(
+            f"找不到歌词文件：{lrc_path}"
+        )
+
+    font_paths = font_paths or {}
+
+    fonts = {
+        "current": _load_font(
+            FS_CURRENT,
+            bold=True,
+            custom_path=font_paths.get(
+                "lyric",
+                CUSTOM_FONT_LYRIC
+            )
+        ),
+        "normal": _load_font(
+            FS_NORMAL,
+            custom_path=font_paths.get(
+                "lyric",
+                CUSTOM_FONT_LYRIC
+            )
+        ),
+        "title": _load_font(
+            FS_TITLE,
+            bold=True,
+            custom_path=font_paths.get(
+                "title",
+                CUSTOM_FONT_TITLE
+            )
+        ),
+        "artist": _load_font(
+            FS_ARTIST,
+            custom_path=font_paths.get(
+                "artist",
+                CUSTOM_FONT_ARTIST
+            )
+        ),
+    }
+
+    audio = None
+    audio_segment = None
+    video = None
+
+    bg_full = None
+    bg_scaled = None
+    cover_src = None
+    cover_crop = None
+    cover_base = None
+
+    temporary_audio_path = None
+    temporary_video_path = None
+
+    try:
+        # 处理中文音频路径
+        ffmpeg_audio_path, temporary_audio_path = (
+            _prepare_audio_for_ffmpeg(audio_path)
+        )
+
+        # m4a 会在这里由 FFmpeg 解码
+        audio = AudioFileClip(
+            ffmpeg_audio_path
+        )
+
+        audio_duration = float(
+            audio.duration or 0
+        )
+
+        if audio_duration <= 0:
+            raise ValueError(
+                f"无法读取音频时长：{audio_path}"
+            )
+
+        # 读取歌词
+        metadata, lyrics = _parse_lrc(
+            str(lrc_path)
+        )
+
+        lyric_times = [
+            timestamp
+            for timestamp, _ in lyrics
+        ]
+
+        title = metadata.get(
+            "ti",
+            song_stem
+        )
+
+        artist = (
+            artist_name
+            or metadata.get("ar", "")
+        )
+
+        # ----------------------------------------------------
+        # 加载背景图
+        # ----------------------------------------------------
+
+        background_path = _find_image(
+            img_dir,
+            target_bg
+        )
+
+        if background_path:
+            with Image.open(background_path) as raw_image:
+                original_width, original_height = (
+                    raw_image.size
+                )
+
+                target_aspect = (
+                    VIDEO_W / VIDEO_H
+                )
+
+                original_aspect = (
+                    original_width / original_height
+                )
+
+                if original_aspect > target_aspect:
+                    # 图片太宽，裁剪左右
+                    new_width = int(
+                        original_height
+                        * target_aspect
+                    )
+
+                    left = (
+                        original_width - new_width
+                    ) // 2
+
+                    crop_box = (
+                        left,
+                        0,
+                        left + new_width,
+                        original_height
+                    )
+                else:
+                    # 图片太高，裁剪上下
+                    new_height = int(
+                        original_width
+                        / target_aspect
+                    )
+
+                    top = (
+                        original_height - new_height
+                    ) // 2
+
+                    crop_box = (
+                        0,
+                        top,
+                        original_width,
+                        top + new_height
+                    )
+
+                bg_full = raw_image.crop(
+                    crop_box
+                ).resize(
+                    (VIDEO_W, VIDEO_H),
+                    Image.LANCZOS
+                )
+        else:
+            bg_full = Image.new(
+                "RGB",
+                (VIDEO_W, VIDEO_H),
+                (20, 20, 30)
+            )
+
+        bg_scaled = bg_full.resize(
+            (
+                int(VIDEO_W * BG_SCALE_FACTOR),
+                int(VIDEO_H * BG_SCALE_FACTOR)
+            ),
+            Image.LANCZOS
+        ).convert("RGBA")
+
+        _close_quietly(bg_full)
+        bg_full = None
+
+        # ----------------------------------------------------
+        # 加载封面图
+        # ----------------------------------------------------
+
+        cover_path = _find_image(
+            img_dir,
+            target_cover
+        )
+
+        # 没有单独封面时，使用背景图
+        if not cover_path:
+            cover_path = background_path
+
+        if cover_path:
+            with Image.open(cover_path) as raw_cover:
+                cover_src = raw_cover.convert("RGB")
+        else:
+            cover_src = Image.new(
+                "RGB",
+                (VIDEO_W, VIDEO_H),
+                (20, 20, 30)
+            )
+
+        cover_width, cover_height = (
+            cover_src.size
+        )
+
+        square_size = min(
+            cover_width,
+            cover_height
+        )
+
+        cover_crop = cover_src.crop(
+            (
+                (cover_width - square_size) // 2,
+                (cover_height - square_size) // 2,
+                (cover_width + square_size) // 2,
+                (cover_height + square_size) // 2
+            )
+        )
+
+        cover_base = cover_crop.resize(
+            (COVER_R * 2, COVER_R * 2),
+            Image.LANCZOS
+        ).convert("RGBA")
+
+        _close_quietly(cover_src)
+        cover_src = None
+
+        _close_quietly(cover_crop)
+        cover_crop = None
+
+        # ----------------------------------------------------
+        # 创建视频
+        # ----------------------------------------------------
+
+        if DEBUG_MODE:
+            render_duration = min(
+                float(DEBUG_DURATION),
+                audio_duration
+            )
+        else:
+            render_duration = audio_duration
+
+        video = VideoClip(
+            lambda current_time: _render_frame(
+                current_time,
+                bg_scaled,
+                cover_base,
+                lyrics,
+                lyric_times,
+                title,
+                artist,
+                fonts
+            ),
+            duration=render_duration
+        )
+
+        audio_segment = audio.subclip(
+            0,
+            render_duration
+        )
+
+        video = video.set_audio(
+            audio_segment
+        )
+
+        temporary_video_path = tempfile.NamedTemporaryFile(
+            suffix=".mp4",
+            delete=False
+        ).name
+
+        video.write_videofile(
+            temporary_video_path,
+            fps=FPS,
+            codec="libx264",
+            audio_codec="aac",
+            preset="fast",
+            ffmpeg_params=[
+                "-crf",
+                "18",
+                "-threads",
+                "4",
+                "-b:a",
+                "320k",
+            ]
+        )
+
+        _close_quietly(video)
+        video = None
+
+        _close_quietly(audio_segment)
+        audio_segment = None
+
+        _close_quietly(audio)
+        audio = None
+
+        # 如果旧视频存在，先删除
         if os.path.exists(video_path):
             os.remove(video_path)
-        shutil.move(_tmp_v, video_path)
+
+        # shutil.move 支持从 C 盘移动到 D 盘
+        shutil.move(
+            temporary_video_path,
+            video_path
+        )
+
+        temporary_video_path = None
+
+
+
+
+        print(
+            f"视频生成完成：{video_path}"
+        )
+
+        return video_path
+
     finally:
-        bg_scaled.close()
-        cover_base.close()
+        _close_quietly(video)
+        _close_quietly(audio_segment)
+        _close_quietly(audio)
 
-        if _tmp_audio_path and os.path.exists(_tmp_audio_path):
+        _close_quietly(bg_full)
+        _close_quietly(bg_scaled)
+
+        _close_quietly(cover_src)
+        _close_quietly(cover_crop)
+        _close_quietly(cover_base)
+
+        # 删除中文路径临时音频
+        if (
+            temporary_audio_path
+            and os.path.exists(temporary_audio_path)
+        ):
             try:
-                os.remove(_tmp_audio_path)
-            except:
+                os.remove(
+                    temporary_audio_path
+                )
+            except Exception:
                 pass
-        if os.path.exists(_tmp_v):
+
+        # 删除临时视频
+        if (
+            temporary_video_path
+            and os.path.exists(temporary_video_path)
+        ):
             try:
-                os.remove(_tmp_v)
-            except:
+                os.remove(
+                    temporary_video_path
+                )
+            except Exception:
                 pass
 
-    print(f"✅ B站专属渲染完成 (4K录制标准): {video_path}")
-    return video_path
 
+# ============================================================
+# 9. 批量执行入口
+# ============================================================
 
-# ════════════════════════════════════════════════════════
-#  执行入口
-# ════════════════════════════════════════════════════════
 if __name__ == "__main__":
-    # 这里把你之前删掉或者想跑的歌曲都在这里补全
-    # songs = [
-    #     # ("春庭雪", "等什么君", "chuntingxue"),
-    #     # ("谪仙", "伊格赛听&叶里", "zhexian"),
-    #     # ("十年人间", "李常超", "shinianrenjian1"),
-    #     # ("难却", "平生不晚", "nanque2"),
-    #     # ("答案", "杨坤&郭采洁 &叶里", "dnan"),
-    #     # ("下雨了", "薛之谦", "xiayule"),
-    #     ("来自天堂的魔鬼", "邓紫棋", "tiantang"),
-    #     ("其实", "薛之谦", "qishi","qishi1"),
-    #     # ("怪咖", "薛之谦", "guaika"),
-    #     ("演员", "薛之谦", "yanyuan","qishi1"),
-    #     # ("聊表心意", "薛之谦", "liaobiaoxinyi"),
-    #     # ("肆无忌惮", "薛之谦", "siwujidan"),
-    #     ("认真的雪", "薛之谦","yanyuan","qishi1"),
-    #     # ("迟迟", "薛之谦", "chichi"),
-    #     # ("金斧子银斧子", "薛之谦", "chichi"),
-    #     ("霸王别姬", "薛之谦", "bawang","qishi1"),
+
+    # 这里继续填写你的歌曲列表。
     #
-    #     # ("春庭雪", "等什么君", "chuntingxue"),
-    #     # ("谪仙", "伊格赛听&叶里", "zhexian"),
-    #     # ("十年人间", "李常超", "shinianrenjian1"),
-    #     # ("难却", "平生不晚", "nanque2"),
-    #     # ("答案", "杨坤&郭采洁 &叶里", "dnan"),
+    # 第一个参数：
+    #   可以写歌曲名，也可以写歌曲名.m4a
     #
+    # 第二个参数：
+    #   歌手名称
     #
-    #     ("一半", "薛之谦", "xiayule"),
-    #     ("丑八怪", "薛之谦", "chichi"),
-    #     ("你还要我怎样", "薛之谦", "chichi"),
-    #     ("像风一样", "薛之谦", "xiayule"),
-    #     ("刚刚好", "薛之谦", "chichi"),
-    #     ("初学者", "薛之谦", "chichi"),
-    #     ("动物世界", "薛之谦", "xiayule"),
-    #     ("变废为宝", "薛之谦", "chichi"),
-    #     ("可", "薛之谦", "chichi"),
-    #     ("天外来物", "薛之谦", "xiayule"),
-    #     ("小尖尖", "薛之谦", "chichi"),
-    #     ("情书", "薛之谦", "chichi"),
+    # 第三个参数：
+    #   resources/imgs 目录中的背景图片名称，不需要扩展名
     #
-    #     ("念", "薛之谦", "xiayule"),
-    #     ("意外", "薛之谦", "chichi"),
-    #     ("我好像在哪见过你", "薛之谦", "chichi"),
-    #     ("方圆几里", "薛之谦", "xiayule"),
-    #     ("无数", "薛之谦", "chichi"),
-    #     ("暧昧", "薛之谦", "chichi"),
-    #
-    #     ("最好", "薛之谦", "xiayule"),
-    #     ("木偶人", "薛之谦", "chichi"),
-    #     ("落城", "薛之谦", "chichi"),
-    #     ("狐狸", "薛之谦", "xiayule"),
-    #     ("男二号", "薛之谦", "chichi"),
-    #     ("租购", "薛之谦", "chichi"),
-    #
-    #     ("绅士", "薛之谦", "xiayule"),
-    #     ("违背的青春", "薛之谦", "chichi"),
-    #     ("野心", "薛之谦", "chichi"),
-    #
-    #     ("等我回家", "薛之谦", "xiayule"),
-    #     ("有没有", "薛之谦", "chichi"),
-    #     ("友情提示", "薛之谦", "chichi"),
-    #     ("为了遇见你", "薛之谦", "xiayule"),
-    #
-    #
-    #
-    #
-    #
-    #
-    #
-    #
-    #
-    #
-    #     # ("顽疾", "薛之谦", "chichi"),
-    #     # ("虞兮叹", "闻人听书", "yuxitan"),
-    #     # ("莫问归期", "蒋雪儿", "fengcuiyu"),
-    #     # ("江湖之间", "曹雨航", "jianghuzhijian"),
-    #     # ("晚夜微雨问海棠", "镜予歌&喧笑&陈亦洺", "haitang"),
-    #     # ("风催雨", "费戚戚", "fengcuiyu"),
-    #     # ("望", "张碧晨&赵丽颖", "wang"),
-    #     # ("浸春芜", " ", "fagnzhou"),
-    #     # ("青衣", "琪大妈", "qingyi"), shinianrenjian1
-    #     # ("何以歌", "Aki阿杰", "heyige"),  # 改过了直接跑
-    #     # ("春不晚", "冰洁", "chunbuwan"),
-    #     # ("云与海", "阿YueYue", "yun1"),
-    #     # ("十年人间", "李常超", "shinianrenjian1"),
-    # ]
+    # 第四个参数：
+    #   可选，resources/imgs 目录中的封面图片名称
 
     songs = [
-        # ("庙堂之外", "陈楚生", "miaotang"),
-        # # ("一路生花", "温奕心", "yilushegnhua"),
-        # ("云烟成雨", "房东的猫", "yunyanchengyu"),
-        # ("像鱼", "王贰浪", "xiangyu"),
-        # ("可不可以", "张紫豪", "kebukeyi"),
-        # ("吻得太逼真", "张敬轩", "chengquan"),
-        #  ("天亮以前说再见", "曲肖冰", "tianliangyiq"),
-        # # ("忽而今夏", "汪苏泷", "huerjinxia"),
-        #  ("把回忆拼好给你", "王贰浪", "huiyipinh"),
-        ("夏天的风", "温岚", "yilushegnhua"),
-        # ("无名的人", "毛不易", "wumingderen"),
-        # ("时光洪流", "程响", "shiguanhongl"),
+        ("年少有为", "李荣浩", "年少有为"),
+        ("不将就", "李荣浩", "不将就"),
 
-             ]
-    for s in songs:
+        ("伯虎说", "伯爵Johnny&唐伯虎Annie", "伯虎说"),
+        ("红玫瑰", "陈奕迅", "红玫瑰"),
+        ("给我一个理由忘记", "A-Lin", "给我一个理由忘记"),
+
+
+
+        # ("蜀道难", "少司命", "蜀道难"),
+        # ("滕王阁序", "萧忆情&Assen捷", "滕王阁序"),
+
+        # 例如明确指定使用 m4a：
+        # ("起风了.m4a", "买辣椒也用券", "起风了"),
+    ]
+
+    for song in songs:
         try:
-            generate_lyric_video(*s)
-        except Exception as e:
-            print(f"❌ 歌曲 {s[0]} 渲染失败: {e}")
+            generate_lyric_video(*song)
+
+        except Exception as error:
+            print(
+                f"歌曲 {song[0]} 生成失败：{error}"
+            )
+
         finally:
             gc.collect()
-
-
-
-# #!/usr/bin/env python3
-# # -*- coding: utf-8 -*-
-# import gc
-# import os, re, math, shutil, tempfile
-# from pathlib import Path
-# from PIL import Image, ImageDraw, ImageFont
-# import numpy as np
-# from moviepy.editor import VideoClip, AudioFileClip
-#
-# # ════════════════════════════════════════════════════════
-# #  1. 路径自动对齐
-# # ════════════════════════════════════════════════════════
-# PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-#
-#
-# def get_abs_path(*rel_path):
-#     return os.path.join(PROJECT_ROOT, *rel_path)
-#
-#
-# # ════════════════════════════════════════════════════════
-# #  全局默认配置  ★ 4K (3840×2160) 版本
-# # ════════════════════════════════════════════════════════
-# SCALE = 2
-#
-# VIDEO_W = 3840
-# VIDEO_H = 2160
-# FPS = 55
-#
-# DEFAULT_BG_NAME = "jianlaihong"
-# DEFAULT_COVER_NAME = "jianlaihong"
-#
-# CUSTOM_FONT_TITLE = get_abs_path("resources", "fonts", "msyh.ttc")
-# CUSTOM_FONT_ARTIST = get_abs_path("resources", "fonts", "shoujin.TTF")
-# CUSTOM_FONT_LYRIC = get_abs_path("resources", "fonts", "msyh.ttc")
-#
-# DEBUG_DURATION = 45
-# DEBUG_MODE = False
-#
-# FS_CURRENT = 52 * SCALE
-# FS_NORMAL = 42 * SCALE
-# FS_TITLE = 80 * SCALE
-# FS_ARTIST = 52 * SCALE
-#
-# COVER_CX, COVER_CY, COVER_R = 320 * SCALE, 600 * SCALE, 200 * SCALE
-# COVER_BORDER = 18 * SCALE
-# RING_DOTS = 80
-# RING_DOT_R = 4.5 * SCALE
-# RING_GAP = 14 * SCALE
-# COVER_ROT_DEG_PER_SEC = 3.0
-#
-# RING_PULSE_FREQ = 0.5
-# RING_PULSE_MIN_ALPHA = 80
-# RING_PULSE_MAX_ALPHA = 255
-#
-# BG_SCALE_FACTOR = 1.05
-# BG_SWAY_FREQ_X, BG_SWAY_FREQ_Y = 0.25, 0.18
-# BG_SWAY_AMP_X = 10.0 * SCALE
-# BG_SWAY_AMP_Y = 8.0 * SCALE
-#
-# TITLE_X, TITLE_Y = 80 * SCALE, 90 * SCALE
-# ARTIST_X, ARTIST_SPACING = 140 * SCALE, 30 * SCALE
-# LYRIC_X, LYRIC_CURRENT_Y = 860 * SCALE, 320 * SCALE
-# LINE_H = 92 * SCALE
-# LINES_ABOVE = 2
-# LINES_BELOW = 6
-#
-# C_CURRENT = (255, 255, 255)
-# C_ABOVE = (130, 130, 150)
-# C_BELOW = (130, 130, 150)
-# C_TITLE = (255, 255, 255)
-# C_ARTIST = (185, 185, 205)
-#
-# BG_OVERLAY = 85
-# SCROLL_DURATION = 0.32
-#
-#
-# # ════════════════════════════════════════════════════════
-# #  工具函数
-# # ════════════════════════════════════════════════════════
-# def _load_font(size: int, bold: bool = False, custom_path: str = None):
-#     size = int(size)
-#     if custom_path and os.path.exists(custom_path):
-#         try:
-#             return ImageFont.truetype(custom_path, size)
-#         except Exception as e:
-#             print(f"⚠️  无法加载字体 {custom_path}: {e}")
-#
-#     candidates = [r"C:\Windows\Fonts\msyh.ttc", "/System/Library/Fonts/PingFang.ttc"]
-#     for p in candidates:
-#         if os.path.exists(p):
-#             return ImageFont.truetype(p, size)
-#     return ImageFont.load_default()
-#
-#
-# def _parse_lrc(lrc_path: str):
-#     meta, lines = {}, []
-#     time_pat = re.compile(r'\[(\d{2}):(\d{2})\.(\d{2,3})\]')
-#     meta_pat = re.compile(r'\[(\w+):(.*)\]')
-#     with open(lrc_path, encoding='utf-8', errors='replace') as f:
-#         for raw in f:
-#             raw = raw.strip()
-#             if not raw: continue
-#             m = meta_pat.match(raw)
-#             if m and not time_pat.search(raw):
-#                 meta[m.group(1).lower()] = m.group(2).strip()
-#                 continue
-#             times = time_pat.findall(raw)
-#             text = time_pat.sub('', raw).strip()
-#             if not text: continue
-#             for mm, ss, ms in times:
-#                 t = int(mm) * 60 + int(ss) + int(ms.ljust(3, '0')[:3]) / 1000.0
-#                 lines.append((t, text))
-#     lines.sort(key=lambda x: x[0])
-#     return meta, lines
-#
-#
-# def _find_image(folder: str, name_hint: str = None):
-#     exts = [".jpg", ".jpeg", ".png", ".webp", ".bmp"]
-#     folder = Path(folder)
-#     if not folder.exists(): return None
-#     if name_hint:
-#         for ext in exts:
-#             p = folder / (name_hint + ext)
-#             if p.exists(): return str(p)
-#     return None
-#
-#
-# def _ease_out_cubic(t: float) -> float:
-#     return 1 - (1 - max(0.0, min(1.0, t))) ** 3
-#
-#
-# def _draw_text(draw, x, y, text, font, color, alpha=255):
-#     r, g, b = color[:3]
-#     offset = 2 * SCALE
-#     draw.text((x + offset, y + offset), text, font=font, fill=(0, 0, 0, min(120, alpha // 2)))
-#     draw.text((x, y), text, font=font, fill=(r, g, b, alpha))
-#
-#
-# def _paste_cover(frame: Image.Image, cover_base: Image.Image, t: float):
-#     cx, cy, r = COVER_CX, COVER_CY, COVER_R
-#     bw = COVER_BORDER
-#     bd = (r + bw) * 2
-#
-#     current_deg = (t * COVER_ROT_DEG_PER_SEC) % 360
-#     rotated = cover_base.rotate(-current_deg, resample=Image.BICUBIC, expand=False)
-#
-#     d = r * 2
-#     mask = Image.new("L", (d, d), 0)
-#     ImageDraw.Draw(mask).ellipse((0, 0, d, d), fill=255)
-#     cover_circle = Image.new("RGBA", (d, d), (0, 0, 0, 0))
-#     cover_circle.paste(rotated, mask=mask)
-#
-#     border = Image.new("RGBA", (bd, bd), (0, 0, 0, 0))
-#     bmask = Image.new("L", (bd, bd), 0)
-#     ImageDraw.Draw(bmask).ellipse((0, 0, bd, bd), fill=255)
-#     border.paste(Image.new("RGBA", (bd, bd), (0, 0, 0, 255)), mask=bmask)
-#
-#     frame.paste(border, (cx - r - bw, cy - r - bw), border)
-#     frame.paste(cover_circle, (cx - r, cy - r), cover_circle)
-#
-#     mask.close()
-#     cover_circle.close()
-#     border.close()
-#     bmask.close()
-#     rotated.close()
-#
-#
-# def _draw_ring_dots(layer: Image.Image, t: float):
-#     draw = ImageDraw.Draw(layer)
-#     cx, cy, r = COVER_CX, COVER_CY, COVER_R
-#     dist = r + COVER_BORDER + RING_GAP
-#     pulse = math.sin(t * RING_PULSE_FREQ * 2 * math.pi)
-#     alpha = int((RING_PULSE_MAX_ALPHA - RING_PULSE_MIN_ALPHA) / 2 * (pulse + 1) + RING_PULSE_MIN_ALPHA)
-#     for i in range(RING_DOTS):
-#         angle = 2 * math.pi * i / RING_DOTS
-#         x = cx + dist * math.cos(angle)
-#         y = cy + dist * math.sin(angle)
-#         draw.ellipse(
-#             (x - RING_DOT_R, y - RING_DOT_R, x + RING_DOT_R, y + RING_DOT_R),
-#             fill=(255, 255, 255, alpha)
-#         )
-#
-#
-# def _render_frame(t, bg_scaled, cover_base, lyrics, song_title, artist, fonts):
-#     sway_x = int(round(math.sin(t * BG_SWAY_FREQ_X * 2 * math.pi) * BG_SWAY_AMP_X))
-#     sway_y = int(round(math.cos(t * BG_SWAY_FREQ_Y * 2 * math.pi) * BG_SWAY_AMP_Y))
-#     sw, sh = bg_scaled.size
-#     cx_crop = max(0, min((sw - VIDEO_W) // 2 + sway_x, sw - VIDEO_W))
-#     cy_crop = max(0, min((sh - VIDEO_H) // 2 + sway_y, sh - VIDEO_H))
-#
-#     frame = bg_scaled.crop((cx_crop, cy_crop, cx_crop + VIDEO_W, cy_crop + VIDEO_H)).convert("RGBA")
-#     frame = Image.alpha_composite(frame, Image.new("RGBA", frame.size, (0, 0, 0, BG_OVERLAY)))
-#
-#     _paste_cover(frame, cover_base, t)
-#
-#     ring_layer = Image.new("RGBA", frame.size, (0, 0, 0, 0))
-#     _draw_ring_dots(ring_layer, t)
-#     frame = Image.alpha_composite(frame, ring_layer)
-#
-#     draw = ImageDraw.Draw(frame)
-#     _draw_text(draw, TITLE_X, TITLE_Y, f"【{song_title}】", fonts["title"], C_TITLE)
-#     if artist:
-#         _draw_text(draw, ARTIST_X, TITLE_Y + FS_TITLE + ARTIST_SPACING, artist, fonts["artist"], C_ARTIST)
-#
-#     cur = -1
-#     for i, (ts, _) in enumerate(lyrics):
-#         if ts <= t: cur = i
-#
-#     if cur == -1:
-#         scroll_offset, top_offset = 0, 0
-#     else:
-#         scroll_offset = LINE_H * (1.0 - _ease_out_cubic((t - lyrics[cur][0]) / SCROLL_DURATION))
-#         top_offset = max(0, LINES_ABOVE - cur) * LINE_H
-#
-#     display_cur = max(cur, 0)
-#     for rel in range(-LINES_ABOVE, LINES_BELOW + 1):
-#         idx = display_cur + rel
-#         if idx < 0 or idx >= len(lyrics): continue
-#         y = int(LYRIC_CURRENT_Y - top_offset + rel * LINE_H + scroll_offset)
-#         is_current = (rel == 0 and cur >= 0)
-#         font = fonts["current"] if is_current else fonts["normal"]
-#         color = C_CURRENT if is_current else (C_ABOVE if rel < 0 else C_BELOW)
-#         alpha = (255 if is_current
-#                  else max(0, int(200 * (1.0 - abs(rel) * 0.45))) if rel < 0
-#         else max(0, int(150 * (1.0 - (rel - 1) * 0.13))))
-#         if alpha > 0:
-#             _draw_text(draw, LYRIC_X, y, lyrics[idx][1], font, color, alpha)
-#
-#     ret_array = np.array(frame.convert("RGB"))
-#
-#     frame.close()
-#     ring_layer.close()
-#
-#     return ret_array
-#
-#
-# # ════════════════════════════════════════════════════════
-# #  🎯 主封装函数
-# # ════════════════════════════════════════════════════════
-# def generate_lyric_video(song_name: str,
-#                          artist_name: str = "",
-#                          bg_name: str = None,
-#                          cover_name: str = None,
-#                          font_paths: dict = None) -> str:
-#     target_bg = bg_name if bg_name else DEFAULT_BG_NAME
-#     target_cover = cover_name if cover_name else target_bg
-#
-#     mp3_path = get_abs_path("input", f"{song_name}.mp3")
-#     lrc_path = get_abs_path("output", "lrcCorrection", f"{song_name}.lrc")
-#     img_dir = get_abs_path("resources", "imgs")
-#     out_dir = get_abs_path("output", "vedio")
-#     video_path = os.path.join(out_dir, f"{song_name}.mp4")
-#     os.makedirs(out_dir, exist_ok=True)
-#
-#     fp = font_paths or {}
-#     fonts = {
-#         "current": _load_font(FS_CURRENT, bold=True, custom_path=fp.get("lyric", CUSTOM_FONT_LYRIC)),
-#         "normal": _load_font(FS_NORMAL, custom_path=fp.get("lyric", CUSTOM_FONT_LYRIC)),
-#         "title": _load_font(FS_TITLE, bold=True, custom_path=fp.get("title", CUSTOM_FONT_TITLE)),
-#         "artist": _load_font(FS_ARTIST, custom_path=fp.get("artist", CUSTOM_FONT_ARTIST)),
-#     }
-#
-#     _tmp_mp3 = None
-#     if not all(ord(c) < 128 for c in mp3_path):
-#         _tmp = tempfile.NamedTemporaryFile(suffix=".mp3", delete=False)
-#         _tmp.close()
-#         shutil.copy2(mp3_path, _tmp.name)
-#         _tmp_mp3 = _tmp.name
-#
-#     audio = AudioFileClip(_tmp_mp3 if _tmp_mp3 else mp3_path)
-#
-#     meta, lyrics = _parse_lrc(lrc_path)
-#     title = meta.get("ti", song_name)
-#     artist = artist_name or meta.get("ar", "")
-#
-#     # ──── ★ 背景图动态适配与裁剪部分 (核心修改) ────
-#     bg_p = _find_image(img_dir, target_bg)
-#     if bg_p:
-#         with Image.open(bg_p) as img_raw:
-#             orig_w, orig_h = img_raw.size
-#             target_aspect = VIDEO_W / VIDEO_H  # 16:9 = 1.7778
-#             orig_aspect = orig_w / orig_h
-#
-#             if orig_aspect > target_aspect:
-#                 # 图片太宽，裁剪左右
-#                 new_w = int(orig_h * target_aspect)
-#                 left = (orig_w - new_w) // 2
-#                 crop_box = (left, 0, left + new_w, orig_h)
-#             else:
-#                 # 图片太高/太窄（包括手机竖屏9:16），裁剪上下
-#                 new_h = int(orig_w / target_aspect)
-#                 top = (orig_h - new_h) // 2
-#                 crop_box = (0, top, orig_w, top + new_h)
-#
-#             bg_full = img_raw.crop(crop_box).resize((VIDEO_W, VIDEO_H), Image.LANCZOS)
-#     else:
-#         bg_full = Image.new("RGB", (VIDEO_W, VIDEO_H), (20, 20, 30))
-#
-#     bg_scaled = bg_full.resize(
-#         (int(VIDEO_W * BG_SCALE_FACTOR), int(VIDEO_H * BG_SCALE_FACTOR)),
-#         Image.LANCZOS
-#     ).convert("RGBA")
-#     bg_full.close()
-#
-#     # ──── 封面图逻辑保持不变 ────
-#     cp = _find_image(img_dir, target_cover)
-#     cover_src = Image.open(cp if cp else (bg_p if bg_p else None)).convert("RGB")
-#     w, h = cover_src.size
-#     sq = min(w, h)
-#     cover_src = cover_src.crop(((w - sq) // 2, (h - sq) // 2, (w + sq) // 2, (h + sq) // 2))
-#
-#     d = COVER_R * 2
-#     cover_base = cover_src.resize((d, d), Image.LANCZOS).convert("RGBA")
-#     cover_src.close()
-#
-#     render_dur = DEBUG_DURATION if DEBUG_MODE else audio.duration
-#
-#     video = VideoClip(
-#         lambda t: _render_frame(t, bg_scaled, cover_base, lyrics, title, artist, fonts),
-#         duration=render_dur
-#     )
-#     video = video.set_audio(audio.subclip(0, render_dur))
-#
-#     _tmp_v = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False).name
-#
-#     try:
-#         video.write_videofile(
-#             _tmp_v, fps=FPS, codec="libx264", audio_codec="aac", preset="fast",
-#             ffmpeg_params=["-crf", "18", "-threads", "4"]
-#         )
-#
-#         video.close()
-#         audio.close()
-#
-#         if os.path.exists(video_path):
-#             os.remove(video_path)
-#         shutil.move(_tmp_v, video_path)
-#
-#     finally:
-#         bg_scaled.close()
-#         cover_base.close()
-#
-#         if _tmp_mp3 and os.path.exists(_tmp_mp3):
-#             try:
-#                 os.remove(_tmp_mp3)
-#             except:
-#                 pass
-#         if os.path.exists(_tmp_v):
-#             try:
-#                 os.remove(_tmp_v)
-#             except:
-#                 pass
-#
-#     print(f"✅ 完成渲染 (4K): {video_path}")
-#     return video_path
-#
-#
-# # ════════════════════════════════════════════════════════
-# #  执行入口
-# # ════════════════════════════════════════════════════════
-# if __name__ == "__main__":
-#     songs = [
-
-
-
-
-#         ("谪仙", "伊格赛听&叶里", "zhexian"),
-#         ("青衣", "琪大妈", "qingyi"),
-#         # # ("红昭愿", "音阙诗听", "hongzhao"),
-#         # ("春庭雪", "等什么君", "chuntingxue"),
-#         ("春不晚", "冰洁", "chunbuwan"),
-#         # ("沈园外", " ", "shenyuan1"),
-#         ("云与海", "阿YueYue", "yun1"),
-#         # ("不凡", "王铮亮", "fanren4"),
-#         ("十年人间", "李常超", "biji"),
-#         # ("想你和我们的以后", "苏运莹", "huayuan"),
-#         # ("何以歌", "Aki阿杰", "heyige"),
-#         # ("一花一剑", "李鑫一", "huajian"),
-#         # ("陪你去流浪", "XueZhiQian", "liulang"),
-#     ]
-#
-#     for s in songs:
-#         try:
-#             generate_lyric_video(*s)
-#         except Exception as e:
-#             print(f"❌ 歌曲 {s[0]} 渲染失败: {e}")
-#         finally:
-#             gc.collect()
